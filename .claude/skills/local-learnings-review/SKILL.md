@@ -228,14 +228,16 @@ findings, one section per finding, worst first:
 
 Reviewed 3 files in `abc1234..def5678` against `docs/reviews/knowledge-base/`.
 
-### Critical — README tree omits the new skill directory
+### Important — README tree omits the new skill directory
 
 `README.md:188` — `skills/lfx-example/` is shipped but absent from the
 project-structure tree.
 
-> **Detect:** for every new `skills/<name>/` directory or `agents/<name>.md`
-> file the range adds, confirm README.md's skills table, agents table, and
-> project-structure tree each name it.
+> **Detect:** for every new `skills/<name>/` directory, `agents/<name>.md`
+> file, `CLAUDE.md`, or `AGENTS.md` the range adds, confirm the
+> project-structure tree names it. A new skill must also appear in the
+> skills table; a new agent must also appear in the agents table. Do not
+> require a skill in the agents table, or an agent in the skills table.
 
 — `docs/reviews/knowledge-base/inventory.md`, entry
 `inventory/readme-must-list-new-surfaces`

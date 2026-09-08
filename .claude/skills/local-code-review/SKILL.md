@@ -181,7 +181,7 @@ finding, worst first:
 Reviewed `skills/lfx-example/SKILL.md` and 1 other file in
 `abc1234..def5678`.
 
-### Critical — description omits when-to-use triggers
+### Important — description omits when-to-use triggers
 
 `skills/lfx-example/SKILL.md:3` — the description states only what the skill
 does.

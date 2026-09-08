@@ -12,7 +12,7 @@ Launch exactly three generic subagents in one parallel batch, using model
 
 | Role | Skill to load |
 | --- | --- |
-| `general` | `lfx-general-code-review` |
+| `general` | `lfx-skills:lfx-general-code-review` |
 | `repo_code` | `local-code-review` |
 | `repo_learnings` | `local-learnings-review` |
 
