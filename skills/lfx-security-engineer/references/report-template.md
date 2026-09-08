@@ -44,7 +44,7 @@ required of a finding (what, risk, fix), just condensed to fewer lines:]
 
 📊 SUMMARY
 
-  Status: [✅ APPROVED | ⚠️ REVIEW NEEDED | 🔴 BLOCKERS FOUND]
+  Status: [✅ NO FINDINGS | ⚠️ REVIEW NEEDED | 🔴 BLOCKERS FOUND]
 
   [N] critical issues must be fixed before merge
   [N] warnings should be addressed (recommend fixing before merge)
@@ -59,7 +59,7 @@ required of a finding (what, risk, fix), just condensed to fewer lines:]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Exit code: [0 = pass, 1 = warnings, 2 = blockers]
+Exit code: [0 = no findings above MEDIUM, 1 = review needed, 2 = blockers]
 ```
 
 ## Detailed Finding Format
@@ -100,11 +100,16 @@ Include direct links to the relevant OWASP documentation for each check:
 
 Always use clickable format: `File: src/config/db.ts:15`
 
-## Exit Codes for CI/CD
+## Exit Codes
 
-- **Exit code 0** — All checks passed, security approved
-- **Exit code 1** — Warnings found, recommend review before merge
-- **Exit code 2** — Critical blockers found, CI should fail
+- **Exit code 0** — No findings above MEDIUM
+- **Exit code 1** — Findings that need confirmation against the source
+- **Exit code 2** — Credential-shaped findings; safe to fail a build on
+
+Report the code, but do not describe exit 0 as a security approval — Phase 1
+matches single lines and cannot see cross-file or config-level failures. Only
+exit 2 is reliable enough to gate a required check; see the CI usage section in
+`SKILL.md`.
 
 ## Suppressed Finding Format
 

@@ -89,6 +89,17 @@ scan_files() {
   filter_files "$ext_filter" | xargs -r grep -HnE "$grep_pattern" 2>/dev/null || true
 }
 
+# Case-insensitive variant of scan_files.
+# Deliberately a separate helper rather than adding -i to scan_files: only the
+# secrets check needs case-insensitivity (variable names are camelCase as often
+# as snake_case), and flipping -i globally would silently change the match
+# behaviour of all the other checks.
+scan_files_i() {
+  local ext_filter="$1"
+  local grep_pattern="$2"
+  filter_files "$ext_filter" | xargs -r grep -HniE "$grep_pattern" 2>/dev/null || true
+}
+
 # Check if a file is a test file (for false positive reduction)
 is_test_file() {
   local file="$1"
@@ -147,14 +158,19 @@ emit_finding() {
     esac
     description="$description [test file]"
   fi
-  # MEDIUM is exclusively a test-file downgrade (see above) — a low-confidence
-  # signal that's noise by default. Only surface it when --all was passed.
+  # MEDIUM means "a lead for the Phase 2 agent, not a defect" — either a
+  # test-file downgrade or a heuristic that needs human judgment to resolve
+  # (see check_access_control). It is noise by default; --all surfaces it.
   if [[ "$severity" == "MEDIUM" && "$SHOW_ALL" != "true" ]]; then
     return
   fi
+  # MEDIUM deliberately does not touch MAX_SEVERITY. The exit code must describe
+  # the repo, not the invocation: if MEDIUM counted, the same clean checkout
+  # would exit 0 without --all and 1 with it, which makes the code useless to a
+  # caller and surprising to a human.
   case "$severity" in
     CRITICAL) MAX_SEVERITY="CRITICAL" ;;
-    HIGH|MEDIUM) [[ "$MAX_SEVERITY" != "CRITICAL" ]] && MAX_SEVERITY="WARNING" ;;
+    HIGH) [[ "$MAX_SEVERITY" != "CRITICAL" ]] && MAX_SEVERITY="WARNING" ;;
   esac
   echo "FINDING|$severity|$check|$file_line|$description"
 }
@@ -163,52 +179,103 @@ emit_finding() {
 # CHECK 1: Secrets and Credentials
 # ============================================================
 check_secrets() {
-  local findings
-  findings=$(scan_files '\.(ts|js|go|rs|py|json|yaml|yml|env|tf|tfvars)$' \
-    '(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|password|passwd|bearer)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9+/=_\-]{8,}')
+  local ext='\.(ts|js|go|rs|py|json|yaml|yml|env|tf|tfvars)$'
+  # Recognizable credential formats. These identify a secret by its own shape,
+  # so they must never be gated behind a variable-name guess.
+  local live_key_pattern='AKIA[0-9A-Z]{16}|sk_live_|ghp_[0-9a-zA-Z]{36}|AIza[0-9A-Za-z_-]{35}'
+  local placeholder_pattern='process\.env\.|os\.Getenv|your-.*-here|<YOUR_|test-secret|fake-|example-'
+  local found_any=false
 
-  if [ -z "$findings" ]; then
-    echo "PASSED|secrets|No hardcoded secrets or credentials detected"
-    return
+  # --- Pass 1: format-based detection (high confidence, ungated) ---
+  # Runs over every scanned file independently of variable naming: an AWS key
+  # assigned to `apiKey`, `ApiKey`, `creds[0]` or nothing at all is still an
+  # AWS key. Case-sensitive on purpose — these prefixes are fixed-case, and
+  # matching them loosely would turn `aKiA...` typos into findings.
+  local live_findings
+  live_findings=$(scan_files "$ext" "$live_key_pattern")
+  if [ -n "$live_findings" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      # Env-var/placeholder filter still applies. Note we deliberately do NOT
+      # suppress on the substring "EXAMPLE": it would silence a real key on any
+      # line that happens to mention the word, and suppressing a live
+      # credential is a far worse failure than one noisy doc finding.
+      if echo "$line" | grep -qE "$placeholder_pattern"; then
+        continue
+      fi
+      emit_finding CRITICAL secrets "$line" "Live service credential detected" no-downgrade
+      found_any=true
+    done <<< "$live_findings"
   fi
 
-  # Filter out safe patterns
-  while IFS= read -r line; do
-    # Skip env var references, placeholders, and test fixtures
-    if echo "$line" | grep -qE 'process\.env\.|os\.Getenv|your-.*-here|<YOUR_|test-secret|fake-|example-'; then
-      continue
-    fi
-    # Check for live key patterns (high confidence)
-    if echo "$line" | grep -qE 'AKIA[0-9A-Z]{16}|sk_live_|ghp_[0-9a-zA-Z]{36}|AIza[0-9A-Za-z_-]{35}'; then
-      emit_finding CRITICAL secrets "$line" "Live service credential detected" no-downgrade
-    else
+  # --- Pass 2: name-based heuristic (lower confidence) ---
+  # Case-insensitive so `apiKey`, `API_KEY` and `api_key` all match. Bare
+  # `token` is included: it is the most common name for exactly the thing this
+  # check exists to catch.
+  local name_findings
+  name_findings=$(scan_files_i "$ext" \
+    '(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|token|password|passwd|bearer)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9+/=_\-]{8,}')
+  if [ -n "$name_findings" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      if echo "$line" | grep -qE "$placeholder_pattern"; then
+        continue
+      fi
+      # Already reported at full confidence by pass 1 — don't double-report.
+      if echo "$line" | grep -qE "$live_key_pattern"; then
+        continue
+      fi
       emit_finding CRITICAL secrets "$line" "Potential hardcoded secret"
-    fi
-  done <<< "$findings"
+      found_any=true
+    done <<< "$name_findings"
+  fi
+
+  if [ "$found_any" = false ]; then
+    echo "PASSED|secrets|No hardcoded secrets or credentials detected"
+  fi
 }
 
 # ============================================================
 # CHECK 2: OWASP A01 — Broken Access Control
 # ============================================================
+# Route enumeration cannot prove or disprove authorization in LFX V2, because
+# auth is not applied inside the handler body. Services register routes wrapped
+# in middleware — `mux.Handle("POST /...", h.withAuth(http.HandlerFunc(h.Create)))`
+# — and the real decision is enforced out of process at Heimdall/OpenFGA. So the
+# presence of a handler function carries no authz signal at all: on a clean
+# lfx-v2-newsletter-service main, `func.*Handler` matched 30 times with zero true
+# positives, flagging the `withAuth` middleware itself, the request logger, and a
+# liveness probe. The Go branch is therefore removed rather than tuned: no
+# single-file regex can see a wrapper applied at a different call site, and
+# emitting it as MEDIUM would only move the noise, still costing the Phase 2
+# agent turns to dismiss.
+#
+# Authorization review belongs to Phase 2 Review 2, which reads the route table
+# and the middleware together. That is where the real access-control findings on
+# this repo came from.
+#
+# What stays here is deliberately narrow: patterns that name a specific
+# user-controlled identifier reaching a lookup (IDOR shape). Those are emitted as
+# MEDIUM — a lead for the agent to chase behind `--all`, never a gate.
 check_access_control() {
   local findings=""
 
   case "$REPO_TYPE" in
     angular|typescript-bff)
-      # These Express route/IDOR checks apply to the server-side Express proxy/BFF layer
-      # inside the LFX Angular monorepo (e.g. apps/*/server/, server/, bff/), not to
-      # browser-only Angular components.
-      findings=$(scan_files '\.(ts|js)$' 'router\.(get|post|put|delete|patch)\(' 2>/dev/null)
-      # Also check for IDOR patterns
-      local idor
-      idor=$(scan_files '\.(ts|js)$' 'req\.params\.(id|userId|orgId)' 2>/dev/null)
-      findings="$findings"$'\n'"$idor"
+      # IDOR shape only: a request-supplied id used directly. This applies to the
+      # server-side Express proxy/BFF layer inside the LFX Angular monorepo
+      # (e.g. apps/*/server/, server/, bff/), not browser-only components.
+      # Route enumeration (`router.get(...)`) is intentionally not scanned — same
+      # reasoning as the Go branch above.
+      findings=$(scan_files '\.(ts|js)$' 'req\.params\.(id|userId|orgId)' 2>/dev/null)
       ;;
     go)
-      findings=$(scan_files '\.go$' 'func.*Handler|func.*http\.Handler' 2>/dev/null)
+      # Intentionally empty — see the comment block above this function.
+      findings=""
       ;;
     rust)
-      findings=$(scan_files '\.rs$' '#\[(get|post|put|delete)\(' 2>/dev/null)
+      # Path-extractor IDOR shape (axum/actix): an id pulled straight from the path.
+      findings=$(scan_files '\.rs$' 'Path\(\([[:space:]]*[A-Za-z_]*(id|uid|user)' 2>/dev/null)
       ;;
   esac
 
@@ -220,7 +287,11 @@ check_access_control() {
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    emit_finding HIGH access-control "$line" "Route/handler may lack auth middleware — verify manually"
+    # MEDIUM, not HIGH: this is a lead, not a defect. A request-supplied id is
+    # only an IDOR if the subsequent lookup is unscoped, and that is a Phase 2
+    # judgment. MEDIUM keeps it out of the default output and the exit code.
+    emit_finding MEDIUM access-control "$line" \
+      "Request-supplied identifier used directly — confirm the lookup is scoped to the caller"
   done <<< "$findings"
 }
 
@@ -269,9 +340,16 @@ check_crypto() {
 check_injection() {
   local findings=""
 
-  # SQL injection — string concatenation in queries
+  # SQL injection — anchor on string *building*, not on any `+` after a keyword.
+  # The previous `SELECT .+\+` form matched the `+` inside a correctly
+  # parameterized call's argument list — e.g.
+  #   db.NewRaw("SELECT COUNT(*) ... WHERE sg_event_id = ?", group+"-late-ev")
+  # where the `?` placeholder is right and the concat is outside the SQL literal.
+  # It also missed UPDATE/DELETE concatenation and Sprintf-built UPDATE entirely.
+  # Requiring a closing quote immediately followed by `+` ties the match to a
+  # query string being glued to an expression, and covers all four verbs.
   local sql_inj
-  sql_inj=$(scan_files '\.(ts|js|go|rs)$' 'SELECT .+\+|INSERT .+\+|format!\("SELECT|format!\("INSERT|fmt\.Sprintf\("SELECT|fmt\.Sprintf\("DELETE')
+  sql_inj=$(scan_files '\.(ts|js|go|rs)$' '"(SELECT|INSERT|UPDATE|DELETE)[^"]*"[[:space:]]*\+|fmt\.Sprintf\("(SELECT|INSERT|UPDATE|DELETE)|format!\("(SELECT|INSERT|UPDATE|DELETE)')
   findings="$findings"$'\n'"$sql_inj"
 
   # Command injection
@@ -572,6 +650,19 @@ check_migrations
 # --- Summary ---
 echo "# --- END ---"
 
+# Exit code contract. Only exit 2 is safe to gate a build on.
+#
+#   2 — CRITICAL: a recognizable credential format or a committed .tfvars.
+#       Format-based, low false-positive rate. Gate on this.
+#   1 — HIGH: a heuristic pattern match that still needs a human or the Phase 2
+#       agent to confirm. Treat as "review needed", not "build broken".
+#   0 — nothing above MEDIUM.
+#
+# Phase 1 is a mechanical starting checklist, not a standalone gate: it reads
+# single lines in isolation, so it cannot see a wrapper applied at another call
+# site or a value that is safe because of where it came from. Wiring exit 1 into
+# a required check will block clean repos. See the Phase 1 framing note in
+# SKILL.md.
 case "$MAX_SEVERITY" in
   CRITICAL) exit 2 ;;
   WARNING) exit 1 ;;
