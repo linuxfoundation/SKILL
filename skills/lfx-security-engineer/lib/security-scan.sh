@@ -225,7 +225,11 @@ check_secrets() {
       if echo "$line" | grep -qE "$live_key_pattern"; then
         continue
       fi
-      emit_finding CRITICAL secrets "$line" "Potential hardcoded secret"
+      # HIGH, not CRITICAL: this is a name heuristic that pass 1 declined to
+      # confirm by format, so it belongs in the exit-1 "confirm against the
+      # source" band. Emitting CRITICAL would make `token = "some-long-value"`
+      # fail a required check that SKILL.md documents as format-based only.
+      emit_finding HIGH secrets "$line" "Potential hardcoded secret"
       found_any=true
     done <<< "$name_findings"
   fi
@@ -327,7 +331,10 @@ check_crypto() {
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     if echo "$line" | grep -qE 'md5|sha1'; then
-      emit_finding CRITICAL crypto "$line" "Weak hash algorithm — use bcrypt/argon2 for passwords"
+      # HIGH for the same reason: the pattern sees the algorithm, not what the
+      # digest is for. md5 over a cache key or an etag is fine, and only a
+      # human can tell that from md5 over a password.
+      emit_finding HIGH crypto "$line" "Weak hash algorithm — use bcrypt/argon2 if this hashes a password"
     else
       emit_finding HIGH crypto "$line" "Insecure random — use crypto.randomBytes() or OsRng"
     fi

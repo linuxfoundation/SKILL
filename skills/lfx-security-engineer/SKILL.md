@@ -182,7 +182,7 @@ Severity means confidence and consequence, not just noise level:
 
 | Severity | Meaning | Exit code |
 | --- | --- | --- |
-| CRITICAL | Recognizable credential format, or a committed `.tfvars`. Format-based, high confidence. | 2 |
+| CRITICAL | Identified by its own shape, not by a guess about naming: a recognizable credential format, a committed `.tfvars`, a query literal concatenated with an expression, a plain-text sensitive column. | 2 |
 | HIGH | Heuristic match needing confirmation against the source. | 1 |
 | MEDIUM | A lead for Phase 2, or a finding downgraded because it is in a test file. Never gates. | 0 |
 
