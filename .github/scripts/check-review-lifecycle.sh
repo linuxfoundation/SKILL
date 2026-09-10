@@ -306,7 +306,8 @@ grep -qE '^[[:space:]]*run:[[:space:]]*\./\.github/scripts/check-review-lifecycl
 # that file alone lands with no CI signal.
 for guarded in 'skills/lfx-local-review/**' 'skills/lfx-general-code-review/**' \
                'README.md' 'skills/lfx/SKILL.md' 'skills/lfx-pr-resolve/SKILL.md' \
-               '.github/scripts/check-review-lifecycle.sh'; do
+               '.github/scripts/check-review-lifecycle.sh' \
+               '.github/workflows/review-lifecycle-check.yml'; do
   grep -qF -- "- '$guarded'" "$WORKFLOW" || note "$WORKFLOW does not trigger on $guarded"
 done
 group "README catalog-only, and CI runs this checker"
